@@ -280,7 +280,12 @@ class CodeDataset(Dataset):
                 be = self.tokenizer.encode_plus(seq)
                 tokens = be.data['input_ids']
                 weights = [0] * len(tokens)
-                token_start_idx = be.char_to_token(len(prompt) - 1) + 1
+                char_idx = max(0, len(prompt) - 1)
+                token_start_idx = be.char_to_token(char_idx)
+                if token_start_idx is None:
+                    token_start_idx = len(self.tokenizer.encode(prompt, add_special_tokens=False))
+                else:
+                    token_start_idx += 1
                 for token_idx in range(token_start_idx, len(tokens)):
                     weights[token_idx] = 1
             if self.check_sample_valid(tokens, weights):

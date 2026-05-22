@@ -88,7 +88,12 @@ def encode_chat_turn(tokenizer, model_name: str, user_content: str, assistant_co
     be = tokenizer.encode_plus(full_text)
     tokens = be.data["input_ids"]
     weights = [0] * len(tokens)
-    token_start_idx = be.char_to_token(len(prompt_text) - 1) + 1
+    char_idx = max(0, len(prompt_text) - 1)
+    token_start_idx = be.char_to_token(char_idx)
+    if token_start_idx is None:
+        token_start_idx = len(tokenizer.encode(prompt_text, add_special_tokens=False))
+    else:
+        token_start_idx += 1
     for token_idx in range(token_start_idx, len(tokens)):
         weights[token_idx] = 1
     return tokens, weights

@@ -30,7 +30,7 @@ class LossDict:
         p = []
         for k, l in self.d.items():
             if len(l) > 0:
-                s = sum(l) / len(l) / args.grad_acc_steps
+                s = sum(l) / len(l)
                 p.append(f'{k}: {round(s, 6)}')
         return ', '.join(p)
 
@@ -70,6 +70,8 @@ def token_weighted_loss(loss_type, inputs, targets, weights):
         assert False
 
     loss = loss[weights != 0]
+    if loss.numel() == 0:
+        return torch.tensor(0.0, device=inputs.device, dtype=inputs.dtype)
     return loss.mean()
 
 def get_logits_from_lm(lm, inputs, control_ids):
@@ -267,6 +269,11 @@ class Trainer:
         self.args.logger.info(f'Training args {self.args}')
 
         batch_size = self.args.batch_size
+        if batch_size != 1:
+            raise ValueError(
+                'SafeCoder training only supports --batch_size 1 (variable-length samples). '
+                'Increase throughput via --grad_acc_steps and multi-GPU torchrun instead.'
+            )
         train_sampler = RandomSampler(self.dataset)
         dl_workers = getattr(self.args, 'dataloader_num_workers', 0)
         train_dataloader = DataLoader(
@@ -280,7 +287,9 @@ class Trainer:
         )
 
         total_samples = len(self.dataset)
-        effective_batch_size = batch_size * self.args.grad_acc_steps
+        effective_batch_size = (
+            batch_size * self.args.grad_acc_steps * self.accelerator.num_processes
+        )
 
         no_decay = ['bias', 'LayerNorm.weight']
         optimizer_grouped_parameters = [
@@ -326,7 +335,7 @@ class Trainer:
                                   self.accelerator.num_processes, self.args.mixed_precision)
 
         global_step, acc_loss_dict = 0, LossDict(self.loss_keys)
-        set_seed(self.args.seed)
+        set_seed(self.args.seed + self.accelerator.process_index)
         timer = Timer(total_steps)
         timer.start()
         self.model.train()
@@ -374,27 +383,29 @@ class Trainer:
                 progress_bar.set_postfix_str('validating...', refresh=True)
 
             if self.args.save_epochs > 0 and (idx+1) % self.args.save_epochs == 0:
-                self.model.eval()
-                with torch.no_grad():
-                    eval_loss_pp = self.do_eval()
-                self.model.train()
+                eval_loss_pp = None
                 if self._is_main_process():
+                    self.model.eval()
+                    with torch.no_grad():
+                        eval_loss_pp = self.do_eval()
+                    self.model.train()
                     self.args.logger.info('val epoch %s: %s', idx+1, eval_loss_pp)
                     output_dir = os.path.join(self.args.output_dir, f'checkpoint-epoch-{idx+1}')
                     last_output_dir = os.path.join(self.args.output_dir, f'checkpoint-last')
                     self.args.logger.info('Saving model checkpoint to %s and %s', output_dir, last_output_dir)
                     self.save(output_dir)
                     self.save(last_output_dir)
-            self.accelerator.wait_for_everyone()
+                self.accelerator.wait_for_everyone()
 
         if self._is_main_process():
             progress_bar.close()
 
         if (idx+1) % self.args.save_epochs != 0:
-            self.model.eval()
-            with torch.no_grad():
-                eval_loss_pp = self.do_eval()
             if self._is_main_process():
+                self.model.eval()
+                with torch.no_grad():
+                    eval_loss_pp = self.do_eval()
+                self.model.train()
                 self.args.logger.info('final eval loss: %s', eval_loss_pp)
                 last_output_dir = os.path.join(self.args.output_dir, f'checkpoint-last')
                 self.args.logger.info('Saving model checkpoint to %s', last_output_dir)
