@@ -190,6 +190,9 @@ def load_model(model_name, args, device_map: bool | str = "auto"):
             model_kwargs["device_map"] = device_map
         if is_qwen3_model(model_name) or is_qwen3_model(_base_model_name(model_name)):
             model_kwargs["torch_dtype"] = torch.bfloat16
+        attn_impl = getattr(args, 'attn_implementation', None)
+        if attn_impl and attn_impl != 'eager':
+            model_kwargs["attn_implementation"] = attn_impl
         # Legacy chat models (Mistral/Llama2) needed vocab_size=; Qwen3 and modern HF models do not.
         legacy_chat_vocab = model_name in CHAT_MODELS and not is_qwen3_model(model_name)
         if legacy_chat_vocab:

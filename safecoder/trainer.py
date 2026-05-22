@@ -102,6 +102,9 @@ class Trainer:
         mixed_precision = self.args.mixed_precision
         if mixed_precision == 'none':
             mixed_precision = None
+        if getattr(self.args, 'tf32', True) and torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         self.accelerator = Accelerator(
             gradient_accumulation_steps=self.args.grad_acc_steps,
             mixed_precision=mixed_precision,
@@ -258,11 +261,23 @@ class Trainer:
             self.create_lora_config()
             self.model = get_peft_model(self.model, self.lora_config)
 
+        if getattr(self.args, 'compile', False):
+            self.model = torch.compile(self.model)
+
         self.args.logger.info(f'Training args {self.args}')
 
         batch_size = self.args.batch_size
         train_sampler = RandomSampler(self.dataset)
-        train_dataloader = DataLoader(self.dataset, sampler=train_sampler, batch_size=batch_size, drop_last=True)
+        dl_workers = getattr(self.args, 'dataloader_num_workers', 0)
+        train_dataloader = DataLoader(
+            self.dataset,
+            sampler=train_sampler,
+            batch_size=batch_size,
+            drop_last=True,
+            num_workers=dl_workers,
+            pin_memory=torch.cuda.is_available(),
+            persistent_workers=dl_workers > 0,
+        )
 
         total_samples = len(self.dataset)
         effective_batch_size = batch_size * self.args.grad_acc_steps
@@ -274,7 +289,14 @@ class Trainer:
             {'params': [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay) and p.requires_grad],
             'weight_decay': 0.0}
         ]
-        optimizer = AdamW(optimizer_grouped_parameters, lr=self.args.learning_rate, eps=self.args.adam_epsilon)
+        adam_kwargs = dict(lr=self.args.learning_rate, eps=self.args.adam_epsilon)
+        if torch.cuda.is_available():
+            adam_kwargs['fused'] = True
+        try:
+            optimizer = AdamW(optimizer_grouped_parameters, **adam_kwargs)
+        except TypeError:
+            adam_kwargs.pop('fused', None)
+            optimizer = AdamW(optimizer_grouped_parameters, **adam_kwargs)
         num_params = sum(p.numel() for p in self.model.parameters())
         num_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
 
@@ -326,9 +348,9 @@ class Trainer:
                     self.accelerator.backward(loss)
                     if self.accelerator.sync_gradients:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
+                        optimizer.step()
+                        scheduler.step()
+                        optimizer.zero_grad()
 
                 acc_loss_dict.step(loss_dict)
 

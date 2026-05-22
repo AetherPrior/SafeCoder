@@ -3,6 +3,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+# Safe with DataLoader num_workers>0 (tokenizer is used in parent before worker fork).
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
 if [[ -z "${SAFECODER_PYTHON:-}" ]]; then
   if command -v conda >/dev/null 2>&1; then

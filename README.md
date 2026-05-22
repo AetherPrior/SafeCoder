@@ -47,6 +47,14 @@ torchrun --standalone --nproc_per_node=2 scripts/train.py \
 
 For **Qwen3** models (`qwen3-8b`, `Qwen/Qwen3-8B`, etc.), SafeCoder applies the **`qwen3_nothink`** chat template (`enable_thinking=False`) for training and chat-based evaluation—no reasoning blocks in prompts.
 
+### Faster training (H100 / multi-GPU)
+- **SDPA attention** is on by default (`--attn_implementation sdpa`). For more speed: `pip install flash-attn` then `--attn_implementation flash_attention_2`.
+- **Increase throughput**: on 80GB GPUs try `--batch_size 2` (or 4) and lower `--grad_acc_steps` to keep the same effective batch size.
+- **More GPUs**: `NPROC=4` scales near-linearly for LoRA.
+- **DataLoader**: `--dataloader_num_workers 8` (default 4).
+- **Optional**: `--compile` after verifying a short run (first steps are slow while compiling).
+- Avoid `--kl_loss_weight` unless needed (loads a second full model).
+
 Here, `--pretrain_name` specifies the base pretrained LLM, `--output_name` denotes the user-provided name of the fine-tuned model, and `--datasets` represents a list of datasets used for training (see [the datasets section](#datasets) for more details). We also provide fine-tuned versions of Mistral-7B ([link](https://files.sri.inf.ethz.ch/safecoder/mistral-7b-lora-safecoder.tar.gz)) and CodeLlama-7B ([link](https://files.sri.inf.ethz.ch/safecoder/codellama-7b-lora-safecoder.tar.gz)), such that the user does not necessarily need to perform fine-tuning by themselves.
 
 ## Evaluation

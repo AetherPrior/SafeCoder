@@ -2,6 +2,9 @@ import os
 import sys
 from pathlib import Path
 
+# DataLoader workers fork after tokenizer use in the parent — avoid HF deadlock warnings.
+os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')
+
 # Allow running without editable install: `python scripts/train.py`
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -73,6 +76,18 @@ def get_args():
     parser.add_argument('--mixed_precision', type=str, default='bf16',
                         choices=['none', 'fp16', 'bf16'],
                         help='Mixed precision (launch multi-GPU with torchrun)')
+
+    # Speed / throughput
+    parser.add_argument('--attn_implementation', type=str, default='sdpa',
+                        choices=['eager', 'sdpa', 'flash_attention_2'],
+                        help='Attention backend (sdpa is fast; flash_attention_2 needs pip install flash-attn)')
+    parser.add_argument('--dataloader_num_workers', type=int, default=4,
+                        help='DataLoader worker processes for tokenized sample loading')
+    parser.add_argument('--compile', action='store_true', default=False,
+                        help='Wrap model with torch.compile (PyTorch 2+, first step is slow)')
+    parser.add_argument('--tf32', action='store_true', default=True,
+                        help='Enable TF32 matmul on Ampere+ GPUs (default: on)')
+    parser.add_argument('--no_tf32', action='store_false', dest='tf32')
 
     parser.add_argument('--data_dir', type=str, default=str(_REPO_ROOT / 'data_train_val'))
     parser.add_argument('--model_dir', type=str, default=str(_REPO_ROOT / 'trained'))
