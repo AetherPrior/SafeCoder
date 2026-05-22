@@ -6,7 +6,8 @@ from torch.utils.data import Dataset
 import numpy as np
 from random import shuffle
 
-from safecoder.constants import CWES_TRAINED, CWES_NEW_TRAINED, FUNC, GOOD, BAD, PROMPT_INPUT, PROMPT_NO_INPUT, SAFE_DESC_DATASETS
+from safecoder.constants import CWES_TRAINED, CWES_NEW_TRAINED, FUNC, GOOD, BAD, PROMPT_INPUT, PROMPT_NO_INPUT, SAFE_DESC_DATASETS, CHAT_MODELS
+from safecoder.chat_templates import uses_chat_template, encode_chat_turn
 from safecoder.utils import visualize_pair, visualize_weights, inspect_cwe_dist
 
 
@@ -89,6 +90,7 @@ class CodeDataset(Dataset):
         self.tokenizer = tokenizer
         self.mode = mode
         self.upsampler = Upsampler(args)
+        self.use_chat_template = uses_chat_template(args.pretrain_name, CHAT_MODELS)
 
         func_dataset = []
         for dataset_name in args.datasets:
@@ -164,11 +166,20 @@ class CodeDataset(Dataset):
             tokens_complete_bad, weights_complete_bad = prepd_j['tokens_before'], prepd_j['weights_before']
         else:
             instruction = PROMPT_NO_INPUT.format(instruction=j['description'])
-            instruction_tokenized = self.tokenizer.encode_plus(instruction).data['input_ids']
-            instruction_weights = [0] * len(instruction_tokenized)
-
-            tokens_complete_good, weights_complete_good = instruction_tokenized + prepd_j['tokens_after_trimmed'], instruction_weights + prepd_j['weights_after_trimmed']
-            tokens_complete_bad, weights_complete_bad = instruction_tokenized + prepd_j['tokens_before_trimmed'], instruction_weights + prepd_j['weights_before_trimmed']
+            if self.use_chat_template:
+                assistant_good = self.tokenizer.decode(prepd_j['tokens_after_trimmed'])
+                assistant_bad = self.tokenizer.decode(prepd_j['tokens_before_trimmed'])
+                tokens_complete_good, weights_complete_good = encode_chat_turn(
+                    self.tokenizer, self.args.pretrain_name, instruction, assistant_good
+                )
+                tokens_complete_bad, weights_complete_bad = encode_chat_turn(
+                    self.tokenizer, self.args.pretrain_name, instruction, assistant_bad
+                )
+            else:
+                instruction_tokenized = self.tokenizer.encode_plus(instruction).data['input_ids']
+                instruction_weights = [0] * len(instruction_tokenized)
+                tokens_complete_good, weights_complete_good = instruction_tokenized + prepd_j['tokens_after_trimmed'], instruction_weights + prepd_j['weights_after_trimmed']
+                tokens_complete_bad, weights_complete_bad = instruction_tokenized + prepd_j['tokens_before_trimmed'], instruction_weights + prepd_j['weights_before_trimmed']
 
         pos_sample, neg_sample = None, None
         if self.check_sample_valid(tokens_complete_good, weights_complete_good):
@@ -260,13 +271,18 @@ class CodeDataset(Dataset):
                 prompt = PROMPT_NO_INPUT.format_map({'instruction': j['instruction']})
             else:
                 prompt = PROMPT_INPUT.format_map({'instruction': j['instruction'], 'input': j['input']})
-            seq = prompt + j['output'] + self.tokenizer.eos_token
-            be = self.tokenizer.encode_plus(seq)
-            tokens = be.data['input_ids']
-            weights = [0] * len(tokens)
-            token_start_idx = be.char_to_token(len(prompt) - 1) + 1
-            for token_idx in range(token_start_idx, len(tokens)):
-                weights[token_idx] = 1
+            if self.use_chat_template:
+                tokens, weights = encode_chat_turn(
+                    self.tokenizer, self.args.pretrain_name, prompt, j['output']
+                )
+            else:
+                seq = prompt + j['output'] + self.tokenizer.eos_token
+                be = self.tokenizer.encode_plus(seq)
+                tokens = be.data['input_ids']
+                weights = [0] * len(tokens)
+                token_start_idx = be.char_to_token(len(prompt) - 1) + 1
+                for token_idx in range(token_start_idx, len(tokens)):
+                    weights[token_idx] = 1
             if self.check_sample_valid(tokens, weights):
                 dataset.append((FUNC, tokens, weights))
         return dataset

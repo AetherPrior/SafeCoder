@@ -1,4 +1,12 @@
 import os
+import sys
+from pathlib import Path
+
+# Allow running without editable install: `python scripts/train.py`
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import argparse
 
 from safecoder.utils import set_seed, set_logging
@@ -62,8 +70,12 @@ def get_args():
     parser.add_argument('--save_epochs', type=int, default=10)
     parser.add_argument('--seed', type=int, default=2)
 
-    parser.add_argument('--data_dir', type=str, default='../data_train_val')
-    parser.add_argument('--model_dir', type=str, default='../trained/')
+    parser.add_argument('--mixed_precision', type=str, default='bf16',
+                        choices=['none', 'fp16', 'bf16'],
+                        help='Mixed precision (launch multi-GPU with torchrun)')
+
+    parser.add_argument('--data_dir', type=str, default=str(_REPO_ROOT / 'data_train_val'))
+    parser.add_argument('--model_dir', type=str, default=str(_REPO_ROOT / 'trained'))
 
     args = parser.parse_args()
 
@@ -98,6 +110,8 @@ def get_args():
         else:
             if args.pretrain_name.startswith('codellama'):
                 args.learning_rate = 1e-3
+            elif 'qwen3' in args.pretrain_name.lower() or args.pretrain_name.startswith('Qwen/Qwen3'):
+                args.learning_rate = 1e-4
             else:
                 args.learning_rate = 2e-5
 

@@ -18,9 +18,25 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
 from .constants import PRETRAINED_MODELS, CHAT_MODELS
+from .chat_templates import configure_tokenizer, uses_chat_template, is_qwen3_model, _base_model_name
 from .sven_models import GPTBigCodeForPrefix, PhiPrefix
 
 logger = logging.getLogger()
+
+
+def _load_tokenizer(model_dir: str, model_name: str):
+    """Load tokenizer; fall back to slow tokenizer if fast tokenizer JSON is incompatible."""
+    try:
+        return AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+    except Exception as e:
+        if is_qwen3_model(model_name) or is_qwen3_model(_base_model_name(model_name)):
+            logger.warning(
+                "Fast tokenizer failed (%s); retrying with use_fast=False. "
+                "For Qwen3, upgrade: pip install -r requirements-qwen3.txt",
+                e,
+            )
+            return AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True, use_fast=False)
+        raise
 
 def set_seed(seed):
     random.seed(seed)
@@ -73,11 +89,13 @@ def visualize_weights(tokens, weights, tokenizer, color='green'):
             print(s, end='')
     print()
 
-def load_model(model_name, args):
+def load_model(model_name, args, device_map: bool | str = "auto"):
     """
     Important note:
     This load function will only work for lora models if they are saved in the following pattern:
         <pretrained_base_model_name>-lora<whatever_else>
+
+    Set device_map=False when training with HuggingFace Accelerate (device placement is handled there).
     """
     if '-lora' in model_name:
 
@@ -89,8 +107,12 @@ def load_model(model_name, args):
             fine_tuned_model_dir = os.path.join(args.model_dir, model_name, 'checkpoint-last')
         assert os.path.exists(fine_tuned_model_dir)
 
-        tokenizer = AutoTokenizer.from_pretrained(fine_tuned_model_dir)
-        model = AutoModelForCausalLM.from_pretrained(pretrained_model_dir, device_map='auto', trust_remote_code=True)
+        tokenizer = _load_tokenizer(fine_tuned_model_dir, pretrained_name)
+        configure_tokenizer(tokenizer, pretrained_name)
+        model_kwargs = {"trust_remote_code": True}
+        if device_map:
+            model_kwargs["device_map"] = device_map
+        model = AutoModelForCausalLM.from_pretrained(pretrained_model_dir, **model_kwargs)
         model.resize_token_embeddings(len(tokenizer))
         model = PeftModel.from_pretrained(model, fine_tuned_model_dir)
         model = model.merge_and_unload()
@@ -107,7 +129,11 @@ def load_model(model_name, args):
         else:
             raise NotImplementedError()
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir)
-        model = model_class.from_pretrained(pretrained_model_dir, device_map='auto', vocab_size=len(tokenizer))
+        configure_tokenizer(tokenizer, pretrained_name)
+        model_kwargs = {"vocab_size": len(tokenizer)}
+        if device_map:
+            model_kwargs["device_map"] = device_map
+        model = model_class.from_pretrained(pretrained_model_dir, **model_kwargs)
 
         if 'checkpoint-epoch' in model_name:
             model_dir = os.path.join(args.model_dir, model_name)
@@ -129,7 +155,11 @@ def load_model(model_name, args):
         else:
             raise NotImplementedError()
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir)
-        model = model_class.from_pretrained(pretrained_model_dir, device_map='auto', vocab_size=len(tokenizer))
+        configure_tokenizer(tokenizer, pretrained_name)
+        model_kwargs = {"vocab_size": len(tokenizer)}
+        if device_map:
+            model_kwargs["device_map"] = device_map
+        model = model_class.from_pretrained(pretrained_model_dir, **model_kwargs)
 
         for n, p in model.named_parameters():
             if n.startswith('prefix_params'):
@@ -153,12 +183,23 @@ def load_model(model_name, args):
                 model_dir = os.path.join(args.model_dir, model_name, 'checkpoint-last')
             assert os.path.exists(model_dir)
 
-        tokenizer = AutoTokenizer.from_pretrained(model_dir)
-        if model_name in PRETRAINED_MODELS or model_name == 'deepseek':
-            model = AutoModelForCausalLM.from_pretrained(model_dir, device_map='auto', trust_remote_code=True)
-        else:    
-            model = AutoModelForCausalLM.from_pretrained(model_dir, device_map='auto', trust_remote_code=True, **{'vocab_size': len(tokenizer)})
-        model.resize_token_embeddings(len(tokenizer))
+        tokenizer = _load_tokenizer(model_dir, model_name)
+        configure_tokenizer(tokenizer, model_name)
+        model_kwargs = {"trust_remote_code": True}
+        if device_map:
+            model_kwargs["device_map"] = device_map
+        if is_qwen3_model(model_name) or is_qwen3_model(_base_model_name(model_name)):
+            model_kwargs["torch_dtype"] = torch.bfloat16
+        # Legacy chat models (Mistral/Llama2) needed vocab_size=; Qwen3 and modern HF models do not.
+        legacy_chat_vocab = model_name in CHAT_MODELS and not is_qwen3_model(model_name)
+        if legacy_chat_vocab:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_dir, **model_kwargs, vocab_size=len(tokenizer)
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(model_dir, **model_kwargs)
+        if legacy_chat_vocab or model.get_input_embeddings().weight.shape[0] != len(tokenizer):
+            model.resize_token_embeddings(len(tokenizer))
     return tokenizer, model
 
 def get_cp_args(info):

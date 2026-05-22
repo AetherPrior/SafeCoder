@@ -12,6 +12,7 @@ from pathlib import Path
 from safecoder.utils import set_seed, load_model
 from safecoder.human_eval.problem_yaml import Problem
 from safecoder.constants import PRETRAINED_MODELS, CHAT_MODELS, PROMPT_NO_INPUT, INSTRUCTION
+from safecoder.chat_templates import apply_safecoder_chat_template, uses_chat_template
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -81,7 +82,7 @@ def main():
     tokenizer, model = load_model(args.model_name, args)
     model.eval()
     is_pretrained = args.model_name in PRETRAINED_MODELS
-    is_chat = args.model_name in CHAT_MODELS
+    is_chat = uses_chat_template(args.model_name, CHAT_MODELS)
 
     for problem_yaml_path in tqdm(problems):
         with problem_yaml_path.open() as f:
@@ -98,7 +99,12 @@ def main():
                     {'role': 'user', 'content': prompt},
                     {'role': 'assistant', 'content': extract_funcsig(orig_prompt)}
                 ]
-                prompt = tokenizer.apply_chat_template(messages, tokenize=False)
+                if uses_chat_template(args.model_name, CHAT_MODELS):
+                    prompt = apply_safecoder_chat_template(
+                        tokenizer, args.model_name, messages, tokenize=False
+                    )
+                else:
+                    prompt = tokenizer.apply_chat_template(messages, tokenize=False)
                 prompt = prompt.removeprefix('<s>').removesuffix('</s> ').removesuffix(' </s>')
         elif is_pretrained:
             prompt = orig_prompt

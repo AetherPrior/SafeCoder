@@ -2,12 +2,13 @@
 torch==2.0.1
 transformers==4.37.1
 accelerate
+tqdm
 termcolor
 yamlize
 tabulate
 libcst
 pandas
 sacrebleu
-peft
+peft>=0.10.0,<0.14.0
 openai
 datasets

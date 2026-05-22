@@ -5,8 +5,9 @@ import openai
 import numpy as np
 
 from .utils import load_model, set_seed, try_parse
-from .constants import PROMPT_NO_INPUT, INSTRUCTION, LANGUAGE_MAPS, PRETRAINED_MODELS
+from .constants import PROMPT_NO_INPUT, INSTRUCTION, LANGUAGE_MAPS, PRETRAINED_MODELS, CHAT_MODELS
 from .constants import SECURE_PROMPTING_GENERIC, SECURE_PROMPTING_SPECIFIC, CWE_DESCRIPTIONS
+from .chat_templates import apply_safecoder_chat_template, uses_chat_template
 
 
 def truncate_after(completion, trunc_str):
@@ -201,7 +202,13 @@ class EvalerChat(EvalerBase):
                 {'role': 'user', 'content': prompt},
                 {'role': 'assistant', 'content': file_context+func_context}
             ]
-            prompt = self.tokenizer.apply_chat_template(messages, tokenize=False)
+            model_key = self.args.model_name
+            if uses_chat_template(model_key, CHAT_MODELS):
+                prompt = apply_safecoder_chat_template(
+                    self.tokenizer, model_key, messages, tokenize=False
+                )
+            else:
+                prompt = self.tokenizer.apply_chat_template(messages, tokenize=False)
             prompt = prompt.removeprefix('<s>').removesuffix('</s> ').removesuffix(' </s>').removesuffix('\n<|EOT|>\n')
         return prompt
 

@@ -229,7 +229,14 @@ CHAT_MODELS = {
     'llama2-13b-chat': 'meta-llama/Llama-2-13b-chat-hf',
     'codellama-13b-chat': 'codellama/CodeLlama-13b-Instruct-hf',
     'octocoder': 'bigcode/octocoder',
-    'deepseek': 'deepseek-ai/deepseek-coder-7b-instruct-v1.5'
+    'deepseek': 'deepseek-ai/deepseek-coder-7b-instruct-v1.5',
+    # Qwen3 instruct models (use qwen3_nothink via enable_thinking=False)
+    'qwen3-0.6b': 'Qwen/Qwen3-0.6B',
+    'qwen3-1.7b': 'Qwen/Qwen3-1.7B',
+    'qwen3-4b': 'Qwen/Qwen3-4B',
+    'qwen3-8b': 'Qwen/Qwen3-8B',
+    'qwen3-14b': 'Qwen/Qwen3-14B',
+    'qwen3-32b': 'Qwen/Qwen3-32B',
 }
 
 OPENAI_MODELS = [

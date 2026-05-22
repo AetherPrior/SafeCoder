@@ -4,9 +4,11 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from collections import OrderedDict
-from transformers import AdamW, get_linear_schedule_with_warmup
+from torch.optim import AdamW
+from transformers import get_linear_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, LoraConfig, TaskType
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from tqdm.auto import tqdm
 
 from .utils import set_seed, load_model
 from .timer import Timer
@@ -87,6 +89,8 @@ class Trainer:
         self.model = None
         self.tokenizer = None
         self.dataset = None
+        self.ref_model = None
+        self.accelerator = None
         if self.args.sven:
             self.loss_keys = ['lm', 'contra', 'kl']
         else:
@@ -94,13 +98,26 @@ class Trainer:
             if self.args.kl_loss_weight > 0:
                 self.loss_keys.append('kl')
 
+        from accelerate import Accelerator
+        mixed_precision = self.args.mixed_precision
+        if mixed_precision == 'none':
+            mixed_precision = None
+        self.accelerator = Accelerator(
+            gradient_accumulation_steps=self.args.grad_acc_steps,
+            mixed_precision=mixed_precision,
+        )
+
+    @property
+    def device(self):
+        return self.accelerator.device
+
     def step(self, batch):
         loss_dict = LossDict(self.loss_keys)
 
         sample_types, inputs, weights = batch
-        inputs = inputs.to(self.model.device)
+        inputs = inputs.to(self.device)
         shift_inputs = inputs[..., 1:]
-        weights = weights.to(self.model.device)
+        weights = weights.to(self.device)
         shift_weights = weights[..., 1:]
         outputs = self.model(inputs)
         shift_logits = outputs.logits[..., :-1, :]
@@ -137,11 +154,11 @@ class Trainer:
         loss_dict = LossDict(self.loss_keys)
 
         control_ids, inputs, weights = batch
-        inputs = inputs.to(self.model.device)
+        inputs = inputs.to(self.device)
         shift_inputs = inputs[..., 1:].squeeze(0)
-        weights = weights.to(self.model.device)
+        weights = weights.to(self.device)
         shift_weights = weights[..., 1:].squeeze(0)
-        control_ids = control_ids.to(self.model.device)
+        control_ids = control_ids.to(self.device)
         control_ids -= 1
 
         correct_logits, correct_label_probs = get_logits_from_lm(self.model, inputs, control_ids)
@@ -154,7 +171,7 @@ class Trainer:
         contrastive_probs = torch.stack((correct_label_probs, incorrect_label_probs), dim=1)
         contrastive_probs = F.normalize(contrastive_probs, p=1, dim=-1)
         contrastive_log_probs = torch.log(contrastive_probs)
-        contrastive_labels = torch.zeros(shift_inputs.shape, dtype=torch.int64).to(self.model.device)
+        contrastive_labels = torch.zeros(shift_inputs.shape, dtype=torch.int64).to(self.device)
         contrastive_loss = token_weighted_loss('nll', contrastive_log_probs, contrastive_labels, shift_weights)
         contrastive_loss *= 4
         loss_dict['contra'].append(contrastive_loss.item())
@@ -186,12 +203,17 @@ class Trainer:
         return acc_loss_dict.pretty_print(self.args)
 
     def load_model(self):
-        self.tokenizer, self.model = load_model(self.args.pretrain_name, self.args)
+        self.tokenizer, self.model = load_model(
+            self.args.pretrain_name, self.args, device_map=False
+        )
         self.model.train()
 
         if self.args.kl_loss_weight > 0 and not self.args.sven:
-            _, self.ref_model = load_model(self.args.pretrain_name, self.args)
+            _, self.ref_model = load_model(
+                self.args.pretrain_name, self.args, device_map=False
+            )
             self.ref_model.eval()
+            self.ref_model = self.ref_model.to(self.accelerator.device)
 
     def load_dataset(self):
         self.dataset = CodeDataset(self.args, self.tokenizer, 'train')
@@ -201,15 +223,16 @@ class Trainer:
         """
         For normal models this saves the whole set of weights, for LoRA models it saves the adapter.
         """
+        model = self.accelerator.unwrap_model(self.model)
         if self.args.sven:
             os.makedirs(path, exist_ok=True)
             prefix_file = os.path.join(path, 'pytorch_model.bin')
-            state_dict = self.model.prefix_params.state_dict()
+            state_dict = model.prefix_params.state_dict()
             for k, v in state_dict.items():
                 state_dict[k] = v.cpu()
             torch.save(state_dict, prefix_file)
         else:
-            self.model.save_pretrained(path)
+            model.save_pretrained(path)
             self.tokenizer.save_pretrained(path)
 
     def create_lora_config(self):
@@ -223,6 +246,9 @@ class Trainer:
             lora_dropout=self.args.lora_dropout,
             task_type="CAUSAL_LM"
         )
+
+    def _is_main_process(self):
+        return self.accelerator.is_main_process
 
     def run(self):
         self.load_model()
@@ -239,8 +265,7 @@ class Trainer:
         train_dataloader = DataLoader(self.dataset, sampler=train_sampler, batch_size=batch_size, drop_last=True)
 
         total_samples = len(self.dataset)
-        batch_size = batch_size * self.args.grad_acc_steps
-        total_steps = total_samples // batch_size * self.args.num_train_epochs
+        effective_batch_size = batch_size * self.args.grad_acc_steps
 
         no_decay = ['bias', 'LayerNorm.weight']
         optimizer_grouped_parameters = [
@@ -250,68 +275,106 @@ class Trainer:
             'weight_decay': 0.0}
         ]
         optimizer = AdamW(optimizer_grouped_parameters, lr=self.args.learning_rate, eps=self.args.adam_epsilon)
-        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=self.args.warmup_steps, num_training_steps=total_steps)
         num_params = sum(p.numel() for p in self.model.parameters())
         num_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
 
-        self.args.logger.info('***** Running training *****')
-        self.args.logger.info('  Num samples = %d', total_samples)
-        self.args.logger.info('  Num epoch = %d', self.args.num_train_epochs)
-        self.args.logger.info('  Batch size= 1')
-        self.args.logger.info('  Total batch size (w. accumulation) = %d', batch_size)
-        self.args.logger.info('  Gradient Accumulation steps = %d', self.args.grad_acc_steps)
-        self.args.logger.info('  Total optimization steps = %d', total_steps)
-        self.args.logger.info('  Num val samples = %d', len(self.val_dataset))
-        self.args.logger.info('  Num parameters = %d', num_params)
-        self.args.logger.info('  Num trainable parameters = %d', num_trainable_params)
+        self.model, optimizer, train_dataloader = self.accelerator.prepare(
+            self.model, optimizer, train_dataloader
+        )
+
+        steps_per_epoch = max(1, len(train_dataloader) // self.args.grad_acc_steps)
+        total_steps = steps_per_epoch * self.args.num_train_epochs
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer, num_warmup_steps=self.args.warmup_steps, num_training_steps=total_steps
+        )
+        scheduler = self.accelerator.prepare(scheduler)
+
+        if self._is_main_process():
+            self.args.logger.info('***** Running training *****')
+            self.args.logger.info('  Num samples = %d', total_samples)
+            self.args.logger.info('  Num epoch = %d', self.args.num_train_epochs)
+            self.args.logger.info('  Batch size= 1')
+            self.args.logger.info('  Total batch size (w. accumulation) = %d', effective_batch_size)
+            self.args.logger.info('  Gradient Accumulation steps = %d', self.args.grad_acc_steps)
+            self.args.logger.info('  Total optimization steps = %d', total_steps)
+            self.args.logger.info('  Num val samples = %d', len(self.val_dataset))
+            self.args.logger.info('  Num parameters = %d', num_params)
+            self.args.logger.info('  Num trainable parameters = %d', num_trainable_params)
+            self.args.logger.info('  Processes = %d, mixed_precision = %s',
+                                  self.accelerator.num_processes, self.args.mixed_precision)
 
         global_step, acc_loss_dict = 0, LossDict(self.loss_keys)
         set_seed(self.args.seed)
         timer = Timer(total_steps)
         timer.start()
         self.model.train()
+
+        progress_bar = tqdm(
+            total=total_steps,
+            desc='Training',
+            unit='step',
+            dynamic_ncols=True,
+            disable=not self._is_main_process(),
+        )
+
         for idx in range(self.args.num_train_epochs):
+            if self._is_main_process():
+                progress_bar.set_description(f'Epoch {idx + 1}/{self.args.num_train_epochs}')
             for step, batch in enumerate(train_dataloader):
-                loss, loss_dict = self.sven_step(batch) if self.args.sven else self.step(batch)
-                loss /= self.args.grad_acc_steps
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+                with self.accelerator.accumulate(self.model):
+                    loss, loss_dict = self.sven_step(batch) if self.args.sven else self.step(batch)
+                    self.accelerator.backward(loss)
+                    if self.accelerator.sync_gradients:
+                        self.accelerator.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+
                 acc_loss_dict.step(loss_dict)
 
-                if (step+1) % self.args.grad_acc_steps == 0:
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    scheduler.step()  
+                if self.accelerator.sync_gradients:
                     global_step += 1
+                    if self._is_main_process():
+                        progress_bar.update(1)
 
-                    if self.args.logging_steps > 0 and global_step % self.args.logging_steps == 0:
-                        acc_loss_pp = acc_loss_dict.pretty_print(self.args)
-                        self.args.logger.info('epochs: %s/%d, steps: %s/%d, %s, %s', idx+1, self.args.num_train_epochs, global_step, total_steps, acc_loss_pp, timer)
-                        acc_loss_dict.clear()
+                should_log = global_step > 0 and self.args.logging_steps > 0 and global_step % self.args.logging_steps == 0
+                if should_log and self._is_main_process():
+                    acc_loss_pp = acc_loss_dict.pretty_print(self.args)
+                    progress_bar.set_postfix_str(f'{acc_loss_pp} | ETA {timer}', refresh=False)
+                    self.args.logger.info('epochs: %s/%d, steps: %s/%d, %s, %s', idx+1, self.args.num_train_epochs, global_step, total_steps, acc_loss_pp, timer)
+                    acc_loss_dict.clear()
 
+                if self.accelerator.sync_gradients:
                     timer.end()
                     timer.start()
+
+            if self._is_main_process():
+                progress_bar.set_postfix_str('validating...', refresh=True)
 
             if self.args.save_epochs > 0 and (idx+1) % self.args.save_epochs == 0:
                 self.model.eval()
                 with torch.no_grad():
                     eval_loss_pp = self.do_eval()
                 self.model.train()
-                self.args.logger.info('val epoch %s: %s', idx+1, eval_loss_pp)
-                output_dir = os.path.join(self.args.output_dir, f'checkpoint-epoch-{idx+1}')
-                last_output_dir = os.path.join(self.args.output_dir, f'checkpoint-last')
-                self.args.logger.info('Saving model checkpoint to %s and %s', output_dir, last_output_dir)
-                self.save(output_dir)
-                self.save(last_output_dir)
+                if self._is_main_process():
+                    self.args.logger.info('val epoch %s: %s', idx+1, eval_loss_pp)
+                    output_dir = os.path.join(self.args.output_dir, f'checkpoint-epoch-{idx+1}')
+                    last_output_dir = os.path.join(self.args.output_dir, f'checkpoint-last')
+                    self.args.logger.info('Saving model checkpoint to %s and %s', output_dir, last_output_dir)
+                    self.save(output_dir)
+                    self.save(last_output_dir)
+            self.accelerator.wait_for_everyone()
+
+        if self._is_main_process():
+            progress_bar.close()
 
         if (idx+1) % self.args.save_epochs != 0:
             self.model.eval()
             with torch.no_grad():
                 eval_loss_pp = self.do_eval()
-            self.args.logger.info('final eval loss: %s', eval_loss_pp)
-            # output_dir = os.path.join(self.args.output_dir, f'checkpoint-epoch-{idx+1}')
-            last_output_dir = os.path.join(self.args.output_dir, f'checkpoint-last')
-            # self.args.logger.info('Saving model checkpoint to %s and %s', output_dir, last_output_dir)
-            self.args.logger.info('Saving model checkpoint to %s', last_output_dir)
-            # self.save(output_dir)
-            self.save(last_output_dir)
+            if self._is_main_process():
+                self.args.logger.info('final eval loss: %s', eval_loss_pp)
+                last_output_dir = os.path.join(self.args.output_dir, f'checkpoint-last')
+                self.args.logger.info('Saving model checkpoint to %s', last_output_dir)
+                self.save(last_output_dir)
+            self.accelerator.wait_for_everyone()

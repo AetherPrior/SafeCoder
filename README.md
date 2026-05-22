@@ -2,10 +2,18 @@
 SafeCoder enables large language models (LLMs) to learn to generate secure code during instruction tuning. This is the official repository for [our ICML 2024 paper](https://arxiv.org/abs/2402.09497).
 
 ## Setup
-First, install Python dependencies:
+First, create/use the conda environment and install dependencies:
 ```console
-pip install -r requirements.txt
+conda activate safecoder   # or: conda create -n safecoder python=3.11 -y && conda activate safecoder
 pip install -e .
+
+# For original models (StarCoder, CodeLlama, etc.):
+pip install -r requirements.txt
+
+# For Qwen3 (required — needs transformers>=4.51):
+pip install -r requirements-qwen3.txt
+# or run the setup script:
+./scripts/setup_safecoder_env.sh
 ```
 Then, install [GitHub CodeQL](https://codeql.github.com/), which will be used for evaluating the security of LLM-generated code:
 ```console
@@ -17,10 +25,28 @@ Finally, set up different programming languages studied in this work (`sudo` rig
 ```
 
 ## Training
-Run the following command to fine-tune an pretrained LLM with SafeCoder:
+Run the following command to fine-tune a pretrained LLM with SafeCoder:
 ```console
 python train.py --pretrain_name starcoderbase-1b --output_name starcoderbase-1b-safecoder --datasets evol sec-desc sec-new-desc
 ```
+
+Launch training with **`torchrun`** (single GPU uses plain `python` via the helper script):
+```console
+# Single GPU
+./scripts/train_torchrun.sh --pretrain_name qwen3-8b --output_name qwen3-8b-safecoder --datasets evol sec-desc sec-new-desc --lora
+
+# Multi-GPU
+NPROC=2 ./scripts/train_torchrun.sh --pretrain_name qwen3-8b --output_name qwen3-8b-lora-safecoder \
+  --datasets evol sec-desc sec-new-desc --lora
+
+# Or directly:
+torchrun --standalone --nproc_per_node=2 scripts/train.py \
+  --pretrain_name qwen3-8b --output_name qwen3-8b-lora-safecoder \
+  --datasets evol sec-desc sec-new-desc --lora
+```
+
+For **Qwen3** models (`qwen3-8b`, `Qwen/Qwen3-8B`, etc.), SafeCoder applies the **`qwen3_nothink`** chat template (`enable_thinking=False`) for training and chat-based evaluation—no reasoning blocks in prompts.
+
 Here, `--pretrain_name` specifies the base pretrained LLM, `--output_name` denotes the user-provided name of the fine-tuned model, and `--datasets` represents a list of datasets used for training (see [the datasets section](#datasets) for more details). We also provide fine-tuned versions of Mistral-7B ([link](https://files.sri.inf.ethz.ch/safecoder/mistral-7b-lora-safecoder.tar.gz)) and CodeLlama-7B ([link](https://files.sri.inf.ethz.ch/safecoder/codellama-7b-lora-safecoder.tar.gz)), such that the user does not necessarily need to perform fine-tuning by themselves.
 
 ## Evaluation

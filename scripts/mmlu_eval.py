@@ -6,6 +6,7 @@ import pandas as pd
 
 from safecoder.mmlu import MMLU
 from safecoder.constants import PRETRAINED_MODELS, CHAT_MODELS, PROMPT_NO_INPUT
+from safecoder.chat_templates import apply_safecoder_chat_template, uses_chat_template
 from safecoder.utils import set_logging, set_seed, load_model
 
 
@@ -35,8 +36,14 @@ def prepare_sample(sample, args, tokenizer):
     """
     Applies the instruction formatting. UNUSED.
     """
-    if args.model_name in CHAT_MODELS:
-        sample = tokenizer.apply_chat_template([{'role': 'user', 'content': sample}], tokenize=False)
+    if uses_chat_template(args.model_name, CHAT_MODELS):
+        sample = apply_safecoder_chat_template(
+            tokenizer,
+            args.model_name,
+            [{'role': 'user', 'content': sample}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
     elif args.model_name not in PRETRAINED_MODELS:
         sample = PROMPT_NO_INPUT.format(instruction=sample)
     return sample

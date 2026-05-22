@@ -11,6 +11,7 @@ from collections import OrderedDict
 
 from safecoder.utils import set_logging, set_seed, get_cp_args
 from safecoder.constants import PRETRAINED_MODELS, CHAT_MODELS, CWES_TRAINED, NEW_EVALS, NOT_TRAINED
+from safecoder.chat_templates import uses_chat_template
 from safecoder.evaler import EvalerCodePLM, EvalerCodeFT, EvalerOpenAI, EvalerChat
 
 def get_args():
@@ -229,7 +230,7 @@ def main():
     set_seed(args.seed)
     args.logger.info(f'args: {args}')
 
-    if args.model_name in CHAT_MODELS:
+    if uses_chat_template(args.model_name, CHAT_MODELS):
         evaler = EvalerChat(args)
     elif args.model_name in PRETRAINED_MODELS:
         evaler = EvalerCodePLM(args)
